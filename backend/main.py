@@ -83,6 +83,53 @@ class ForecastItem(BaseModel):
 WEATHER_CACHE = {}
 CACHE_TTL_SECONDS = 1800  # 30 minutes cache duration
 
+# Visual Crossing API Key (Loaded from environment variables)
+VISUAL_CROSSING_API_KEY = os.getenv("VISUAL_CROSSING_API_KEY")
+
+
+def fetch_from_visual_crossing(lat: float, lon: float, api_key: str) -> dict:
+    """
+    Fetch 7-day hourly forecast from Visual Crossing Weather API and format
+    it to match Open-Meteo's standardized output structure.
+    """
+    url = f"https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/{lat},{lon}/next7days"
+    params = {
+        "unitGroup": "metric",
+        "include": "hours",
+        "key": api_key,
+        "contentType": "json"
+    }
+    
+    logger.info(f"Querying Visual Crossing API for Lat: {lat}, Lon: {lon} as fallback.")
+    response = requests.get(url, params=params, timeout=12)
+    response.raise_for_status()
+    data = response.json()
+    
+    times = []
+    temps = []
+    clouds = []
+    radiations = []
+    
+    for day in data.get("days", []):
+        day_date = day.get("datetime")  # e.g., "2026-06-08"
+        for hour in day.get("hours", []):
+            hour_time = hour.get("datetime")  # e.g., "13:00:00"
+            combined_time = f"{day_date}T{hour_time[:5]}"
+            times.append(combined_time)
+            
+            temps.append(float(hour.get("temp", 0.0)))
+            clouds.append(float(hour.get("cloudcover", 0.0)))
+            radiations.append(float(hour.get("solarradiation", 0.0)))
+            
+    return {
+        "hourly": {
+            "time": times,
+            "temperature_2m": temps,
+            "cloud_cover": clouds,
+            "shortwave_radiation": radiations
+        }
+    }
+
 
 @app.get("/")
 def read_root():
@@ -92,7 +139,8 @@ def read_root():
     return {
         "status": "healthy",
         "service": "HeliosForecast API",
-        "fallback_mode": solar_model is None
+        "fallback_mode": solar_model is None,
+        "visual_crossing_configured": VISUAL_CROSSING_API_KEY is not None
     }
 
 
@@ -103,8 +151,8 @@ def get_solar_forecast(
     system_capacity_kw: float = Query(5.0, description="Installed solar system capacity in kW", alias="system_capacity_kw")
 ):
     """
-    Fetch weather forecasts from Open-Meteo for the coordinate and 
-    predict hourly solar yield for 7 days.
+    Fetch weather forecasts from Open-Meteo (or Visual Crossing fallback) 
+    and predict hourly solar yield for 7 days.
     """
     logger.info(f"Received forecast request for Lat: {lat}, Lon: {lon}, Capacity: {system_capacity_kw}kW")
     
@@ -122,6 +170,7 @@ def get_solar_forecast(
         weather_data = cached_entry["data"]
         
     if not weather_data:
+        # Step A: Attempt primary fetch from Open-Meteo
         open_meteo_url = "https://api.open-meteo.com/v1/forecast"
         params = {
             "latitude": lat,
@@ -144,15 +193,31 @@ def get_solar_forecast(
         except requests.exceptions.RequestException as e:
             logger.error(f"Error fetching data from Open-Meteo: {e}")
             
-            # Outage / Rate limit fallback: If we have an expired cache entry, serve it
-            if cached_entry:
-                logger.warning(f"Serving expired cached weather forecast for {cache_key} due to API error.")
-                weather_data = cached_entry["data"]
-            else:
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"Failed to fetch forecast from weather provider: {str(e)}"
-                )
+            # Step B: Fall back to Visual Crossing if API key is configured
+            if VISUAL_CROSSING_API_KEY:
+                try:
+                    logger.info("Open-Meteo request failed. Attempting Visual Crossing fallback...")
+                    weather_data = fetch_from_visual_crossing(lat, lon, VISUAL_CROSSING_API_KEY)
+                    
+                    # Save parsed Visual Crossing data to cache
+                    WEATHER_CACHE[cache_key] = {
+                        "timestamp": current_time,
+                        "data": weather_data
+                    }
+                    logger.info("Successfully fetched and cached forecast from Visual Crossing fallback.")
+                except Exception as vc_err:
+                    logger.error(f"Visual Crossing fallback failed: {vc_err}")
+            
+            # Step C: Fall back to expired cache entry if both APIs failed
+            if not weather_data:
+                if cached_entry:
+                    logger.warning(f"Serving expired cached weather forecast for {cache_key} due to API errors.")
+                    weather_data = cached_entry["data"]
+                else:
+                    raise HTTPException(
+                        status_code=502,
+                        detail=f"Weather providers failed. Open-Meteo: {str(e)}."
+                    )
     
     # Validate the structure of weather data
     if "hourly" not in weather_data:
