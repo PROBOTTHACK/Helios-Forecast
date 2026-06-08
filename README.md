@@ -154,7 +154,12 @@ GET http://localhost:8000/api/forecast?lat=33.4484&lon=-112.0740&system_capacity
 
 If the pre-trained `solar_model.pkl` classifier is missing from `/backend`, the system activates the physics-based fallback formula:
 
-$$\text{predicted\_kw} = \text{capacity} \times \frac{\text{radiation}}{1000} \times \left(0.20 \times \left(1 - \max\left(0, (\text{temp} - 25) \times 0.004\right)\right)\right) \times \left(1 - \frac{\text{cloudcover}}{100} \times 0.75\right)$$
+$$
+\text{predicted}_{\text{kw}} = \text{capacity} \times \frac{\text{radiation}}{1000} \times 
+\left(0.20 \times \left(1 - \max\left(0, (\text{temp} - 25) \times 0.004\right)\right)\right) \times 
+\left(1 - \frac{\text{cloudcover}}{100} \times 0.75\right)
+$$
+
 
 *   **Radiation Scaling**: Solar irradiance values are scaled against Standard Test Conditions ($1000\ W/m^2$).
 *   **Temperature Derating**: Solar panels lose efficiency (0.4% per °C) when cells rise above 25°C.
