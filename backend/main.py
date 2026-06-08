@@ -1,4 +1,5 @@
 import os
+import time
 import logging
 from typing import List, Dict, Any, Optional
 import numpy as np
@@ -76,6 +77,13 @@ class ForecastItem(BaseModel):
     predictedYieldKw: float
 
 
+# In-memory weather cache to prevent 429 rate limit errors
+# Key: (round(lat, 2), round(lon, 2)), approx. 1km coordinate resolution
+# Value: {"timestamp": float, "data": dict}
+WEATHER_CACHE = {}
+CACHE_TTL_SECONDS = 1800  # 30 minutes cache duration
+
+
 @app.get("/")
 def read_root():
     """
@@ -100,25 +108,51 @@ def get_solar_forecast(
     """
     logger.info(f"Received forecast request for Lat: {lat}, Lon: {lon}, Capacity: {system_capacity_kw}kW")
     
-    # 1. Fetch live 7-day hourly forecast from Open-Meteo API
-    open_meteo_url = "https://api.open-meteo.com/v1/forecast"
-    params = {
-        "latitude": lat,
-        "longitude": lon,
-        "hourly": "temperature_2m,cloud_cover,shortwave_radiation",
-        "timezone": "auto"
-    }
+    # 1. Manage caching to avoid Open-Meteo 429 Too Many Requests errors
+    # Group coordinates by rounding to 2 decimal places (roughly 1.1km resolution)
+    cache_key = (round(lat, 2), round(lon, 2))
+    current_time = time.time()
     
-    try:
-        response = requests.get(open_meteo_url, params=params, timeout=10)
-        response.raise_for_status()
-        weather_data = response.json()
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error fetching data from Open-Meteo: {e}")
-        raise HTTPException(
-            status_code=502,
-            detail=f"Failed to fetch forecast from weather provider: {str(e)}"
-        )
+    cached_entry = WEATHER_CACHE.get(cache_key)
+    weather_data = None
+    
+    # Check if we have a fresh cache entry
+    if cached_entry and (current_time - cached_entry["timestamp"] < CACHE_TTL_SECONDS):
+        logger.info(f"Cache hit for coordinates {cache_key}. Using cached forecast.")
+        weather_data = cached_entry["data"]
+        
+    if not weather_data:
+        open_meteo_url = "https://api.open-meteo.com/v1/forecast"
+        params = {
+            "latitude": lat,
+            "longitude": lon,
+            "hourly": "temperature_2m,cloud_cover,shortwave_radiation",
+            "timezone": "auto"
+        }
+        
+        try:
+            logger.info(f"Cache miss for coordinates {cache_key}. Querying Open-Meteo API.")
+            response = requests.get(open_meteo_url, params=params, timeout=10)
+            response.raise_for_status()
+            weather_data = response.json()
+            
+            # Save to cache
+            WEATHER_CACHE[cache_key] = {
+                "timestamp": current_time,
+                "data": weather_data
+            }
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error fetching data from Open-Meteo: {e}")
+            
+            # Outage / Rate limit fallback: If we have an expired cache entry, serve it
+            if cached_entry:
+                logger.warning(f"Serving expired cached weather forecast for {cache_key} due to API error.")
+                weather_data = cached_entry["data"]
+            else:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Failed to fetch forecast from weather provider: {str(e)}"
+                )
     
     # Validate the structure of weather data
     if "hourly" not in weather_data:
