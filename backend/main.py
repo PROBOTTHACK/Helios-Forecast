@@ -76,6 +76,18 @@ class ForecastItem(BaseModel):
     predictedYieldKw: float
 
 
+@app.get("/")
+def read_root():
+    """
+    Root endpoint for Render health checks.
+    """
+    return {
+        "status": "healthy",
+        "service": "HeliosForecast API",
+        "fallback_mode": solar_model is None
+    }
+
+
 @app.get("/api/forecast", response_model=List[ForecastItem])
 def get_solar_forecast(
     lat: float = Query(..., description="Latitude of the location"),
