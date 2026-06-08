@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: heliosforecast-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      # Avoid mounting venv if it exists on host
+      - /app/venv
+    environment:
+      - ENV=production
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: heliosforecast-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
